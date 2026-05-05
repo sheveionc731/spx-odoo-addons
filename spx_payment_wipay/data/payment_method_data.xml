@@ -1,7 +1,0 @@
-<odoo>
-    <record id="payment_method_wipay" model="payment.method">
-        <field name="name">WiPay</field>
-        <field name="code">wipay</field>
-        <field name="active">True</field>
-    </record>
-</odoo>
