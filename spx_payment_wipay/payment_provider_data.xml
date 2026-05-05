@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <record id="payment_method_wipay" model="payment.method">
+        <field name="name">WiPay</field>
+        <field name="code">wipay</field>
+        <field name="active">True</field>
+    </record>
+</odoo>

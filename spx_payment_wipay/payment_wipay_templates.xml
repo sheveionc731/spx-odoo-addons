@@ -1,0 +1,125 @@
+import logging
+import re
+
+from werkzeug import urls
+
+from odoo import _, models
+from odoo.exceptions import ValidationError
+
+_logger = logging.getLogger(__name__)
+
+
+class PaymentTransaction(models.Model):
+    _inherit = 'payment.transaction'
+
+    def _wipay_sanitize_order_id(self, value):
+        value = re.sub(r'[^A-Za-z0-9_-]+', '-', str(value or ''))
+        value = value.strip('-_')
+        return (value or 'ODOO')[:48]
+
+    def _get_specific_rendering_values(self, processing_values):
+        res = super()._get_specific_rendering_values(processing_values)
+        if self.provider_code != 'wipay':
+            return res
+
+        self.ensure_one()
+        provider = self.provider_id
+        partner = self.partner_id
+        base_url = provider.get_base_url()
+        response_url = urls.url_join(base_url, '/payment/wipay/return')
+        currency_code = self.currency_id.name
+
+        if currency_code not in ('TTD', 'USD', 'JMD'):
+            raise ValidationError(
+                _('WiPay only supports TTD, USD, and JMD in this module. Current currency: %s') % currency_code
+            )
+
+        payload = {
+            'account_number': provider.wipay_account_number or '',
+            'country_code': provider.wipay_region or 'TT',
+            'currency': currency_code,
+            'environment': provider._get_wipay_environment(),
+            'fee_structure': provider.wipay_fee_structure or 'customer_pay',
+            'method': 'credit_card',
+            'order_id': self._wipay_sanitize_order_id(self.reference),
+            'origin': provider.wipay_origin or 'Odoo19-WiPay-SPX',
+            'response_url': response_url,
+            'total': '%.2f' % self.amount,
+            'version': '1.0.0',
+            'name': partner.name or '',
+            'email': partner.email or '',
+            'phone': partner.phone or partner.mobile or '',
+            'data': self.reference,
+        }
+
+        try:
+            response_data = provider._send_api_request(
+                'POST',
+                provider._get_wipay_endpoint(),
+                data=payload,
+                reference=self.reference,
+                headers={
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+            )
+        except Exception as exc:
+            _logger.exception('WiPay request failed for transaction %s', self.reference)
+            raise ValidationError(_('WiPay payment request failed: %s') % exc)
+
+        payment_url = response_data.get('url') if isinstance(response_data, dict) else False
+
+        # Some WiPay responses may use a different key. Keep fallbacks to avoid JS redirect crashes.
+        if not payment_url and isinstance(response_data, dict):
+            payment_url = response_data.get('payment_url') or response_data.get('redirect_url')
+
+        if not payment_url:
+            raise ValidationError(_('WiPay did not return a payment URL. Response: %s') % response_data)
+
+        return {
+            'api_url': payment_url,
+            'wipay_payload': {},
+        }
+
+    def _extract_reference(self, provider_code, payment_data):
+        if provider_code != 'wipay':
+            return super()._extract_reference(provider_code, payment_data)
+        return payment_data.get('data') or payment_data.get('reference') or payment_data.get('order_id')
+
+    def _search_by_reference(self, provider_code, payment_data):
+        if provider_code != 'wipay':
+            return super()._search_by_reference(provider_code, payment_data)
+
+        reference = payment_data.get('data') or payment_data.get('reference')
+        order_id = payment_data.get('order_id')
+        domain = [('provider_code', '=', 'wipay')]
+        if reference:
+            domain.append(('reference', '=', reference))
+        elif order_id:
+            domain.append(('reference', 'ilike', order_id))
+        else:
+            raise ValidationError(_('WiPay response is missing reference/order_id.'))
+
+        tx = self.search(domain, limit=1)
+        if not tx:
+            raise ValidationError(_('No WiPay transaction found for reference/order_id: %s') % (reference or order_id))
+        return tx
+
+    def _apply_updates(self, payment_data):
+        if self.provider_code != 'wipay':
+            return super()._apply_updates(payment_data)
+
+        status = (payment_data.get('status') or '').lower()
+        message = payment_data.get('message') or ''
+        transaction_id = payment_data.get('transaction_id') or payment_data.get('id')
+        if transaction_id:
+            self.provider_reference = transaction_id
+
+        if status == 'success':
+            self._set_done(state_message=message)
+        elif status in ('failed', 'fail', 'declined'):
+            self._set_canceled(state_message=message or _('WiPay payment failed.'))
+        elif status == 'error':
+            self._set_error(state_message=message or _('WiPay returned an error.'))
+        else:
+            self._set_pending(state_message=message or _('Waiting for WiPay confirmation.'))

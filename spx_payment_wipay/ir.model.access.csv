@@ -1,0 +1,83 @@
+from odoo import fields, models
+
+
+class PaymentProvider(models.Model):
+    _inherit = 'payment.provider'
+
+    code = fields.Selection(
+        selection_add=[('wipay', 'WiPay')],
+        ondelete={'wipay': 'set default'},
+    )
+
+    wipay_region = fields.Selection(
+        [
+            ('TT', 'Trinidad and Tobago'),
+            ('BB', 'Barbados'),
+            ('GY', 'Guyana'),
+            ('JM', 'Jamaica'),
+        ],
+        string='Region',
+        default='TT',
+        required_if_provider='wipay',
+    )
+
+    wipay_account_number = fields.Char(
+        string='Account Number',
+        required_if_provider='wipay',
+        default='1234567890',
+    )
+
+    wipay_api_key = fields.Char(
+        string='API Key',
+        required_if_provider='wipay',
+        default='123',
+    )
+
+    wipay_fee_structure = fields.Selection(
+        [
+            ('customer_pay', 'Customer Pays Fee'),
+            ('merchant_absorb', 'Merchant Absorbs Fee'),
+            ('split', 'Split Fee'),
+        ],
+        string='Fee Structure',
+        default='customer_pay',
+        required_if_provider='wipay',
+    )
+
+    wipay_origin = fields.Char(
+        string='Origin',
+        default='Odoo19-WiPay-SPX',
+        required_if_provider='wipay',
+    )
+
+    def _get_default_payment_method_codes(self):
+        self.ensure_one()
+        if self.code == 'wipay':
+            return {'wipay'}
+        return super()._get_default_payment_method_codes()
+
+    def _get_redirect_form_view(self, is_validation=False):
+        self.ensure_one()
+        if self.code == 'wipay':
+            return self.env.ref('spx_payment_wipay.redirect_form')
+        return super()._get_redirect_form_view(is_validation=is_validation)
+
+    def _get_wipay_endpoint(self):
+        self.ensure_one()
+        endpoints = {
+            'TT': 'https://tt.wipayfinancial.com/plugins/payments/request',
+            'BB': 'https://bb.wipayfinancial.com/plugins/payments/request',
+            'GY': 'https://gy.wipayfinancial.com/plugins/payments/request',
+            'JM': 'https://jm.wipayfinancial.com/plugins/payments/request',
+        }
+        return endpoints.get(self.wipay_region or 'TT')
+
+    def _get_wipay_environment(self):
+        self.ensure_one()
+        return 'sandbox' if self.state == 'test' else 'live'
+
+    def _get_supported_currencies(self):
+        self.ensure_one()
+        if self.code != 'wipay':
+            return super()._get_supported_currencies()
+        return self.env['res.currency'].search([('name', 'in', ['TTD', 'USD', 'JMD'])])
